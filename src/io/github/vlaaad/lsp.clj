@@ -95,6 +95,7 @@
                            (and (contains? message :method)
                                 (not (contains? message :id)))
                            (do
+                             (tap> [:notify message])
                              (when-let [handler (get handlers (:method message))]
                                (handler (:params message)))
                              (recur next-id requests))
@@ -154,14 +155,18 @@
     (URI. (.getScheme uri) "" (.getPath uri) nil)))
 
 (defn lint [& {:keys [cmd path ext]}]
-  (let [^Process process (apply process/start (if (string? cmd) [cmd] cmd))
-        server (start! process {})]
+  (let [^Process process (apply process/start {:err :inherit} (if (string? cmd) [cmd] cmd))
+        server (start! process {"textDocument/publishDiagnostics" tap>})]
     (try
-      (tap> (request! server "initialize" {:processId (.pid (ProcessHandle/current))
-                                           :rootUri (doto (uri path) tap>)
-                                           :capabilities {:textDocument {:diagnostic {}}}}))
+      (request! server "initialize" {:processId (.pid (ProcessHandle/current))
+                                     :rootUri (uri path)
+                                     :capabilities {:textDocument {:publishDiagnostics {} :diagnostic {}}}})
       (notify! server "initialized")
-      (request! server "textDocument/diagnostic" {:textDocument {:uri (uri "test/lua/test.lua")}})
+      (notify! server "textDocument/didOpen" {:textDocument {:uri (uri "test/lua/test.lua")
+                                                             :languageId "lua"
+                                                             :version 1
+                                                             :text (slurp (uri "test/lua/test.lua"))}})
+      (Thread/sleep 5000)
       (request! server "shutdown")
       (notify! server "exit")
       (finally
@@ -169,5 +174,6 @@
         (when (.isAlive process)
           (.destroyForcibly process))))))
 
-(lint :cmd "C:\\Users\\Vlaaad\\Downloads\\win32-x64\\win32-x64\\bin\\CodeFormatServer.exe"
-      :path "test/lua")
+(comment
+  (lint :cmd "C:\\Users\\Vlaaad\\Downloads\\lua-language-server-3.14.0-win32-x64\\bin\\lua-language-server.exe"
+        :path "test/lua"))
