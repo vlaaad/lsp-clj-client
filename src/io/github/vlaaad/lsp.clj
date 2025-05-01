@@ -3,11 +3,11 @@
             [clojure.java.process :as process]
             [clojure.string :as string]
             [jsonista.core :as json])
-  (:import [java.io InputStream OutputStream]
-           [java.lang ProcessHandle]
-           [java.net URI]
-           [java.nio.charset StandardCharsets]
-           [java.util.concurrent ArrayBlockingQueue BlockingQueue SynchronousQueue TimeUnit]))
+  (:import (java.io File InputStream OutputStream)
+           (java.lang ProcessHandle)
+           (java.net URI)
+           (java.nio.charset StandardCharsets)
+           (java.util.concurrent ArrayBlockingQueue BlockingQueue SynchronousQueue TimeUnit)))
 
 (defn- read-ascii-line [^InputStream in]
   (let [sb (StringBuilder.)]
@@ -95,7 +95,6 @@
                            (and (contains? message :method)
                                 (not (contains? message :id)))
                            (do
-                             (tap> [:notify message])
                              (when-let [handler (get handlers (:method message))]
                                (handler (:params message)))
                              (recur next-id requests))
@@ -151,22 +150,48 @@
          (:result m))))))
 
 (defn- uri [path]
-  (let [uri (.toURI (io/file path))]
+  (let [uri (.toURI (.getCanonicalFile (io/file path)))]
     (URI. (.getScheme uri) "" (.getPath uri) nil)))
 
 (defn lint [& {:keys [cmd path ext]}]
-  (let [^Process process (apply process/start {:err :inherit} (if (string? cmd) [cmd] cmd))
-        server (start! process {"textDocument/publishDiagnostics" tap>})]
+  {:pre [cmd path ext]}
+  (let [path (io/file path)
+        suffix (str "." ext)
+        ^Process process (apply process/start {:err :inherit} (if (string? cmd) [cmd] cmd))
+        done (SynchronousQueue.)
+        to-lint (atom {:todo #{} :results {}})
+        server (start!
+                 process
+                 {"textDocument/publishDiagnostics"
+                  (fn [{:keys [uri diagnostics]}]
+                    (let [uri (URI. uri)]
+                      (let [[old new] (swap-vals!
+                                        to-lint
+                                        (fn [state]
+                                          (-> state
+                                              (update :todo disj uri)
+                                              (update :results assoc uri diagnostics))))]
+                        (when (and (seq (:todo old))
+                                   (empty? (:todo new)))
+                          (.put done true)))))})]
     (try
       (request! server "initialize" {:processId (.pid (ProcessHandle/current))
                                      :rootUri (uri path)
-                                     :capabilities {:textDocument {:publishDiagnostics {} :diagnostic {}}}})
+                                     :capabilities {:textDocument {:publishDiagnostics {}}}})
       (notify! server "initialized")
-      (notify! server "textDocument/didOpen" {:textDocument {:uri (uri "test/lua/test.lua")
-                                                             :languageId "lua"
-                                                             :version 1
-                                                             :text (slurp (uri "test/lua/test.lua"))}})
-      (Thread/sleep 5000)
+      (->> path
+           (tree-seq #(.isDirectory ^File %) #(.listFiles ^File %))
+           (filter #(.endsWith (str %) suffix))
+           (run! (fn [f]
+                   (swap! to-lint update :todo conj (uri f))
+                   (notify! server "textDocument/didOpen" {:textDocument {:uri (uri f)
+                                                                          :languageId ext
+                                                                          :version 1
+                                                                          :text (slurp f)}}))))
+      (.poll done 10 TimeUnit/SECONDS)
+      (doseq [[uri diagnostics] (:results @to-lint)
+              {:keys [message range]} diagnostics]
+        (println (str uri " at " (inc (:line (:start range))) ":" (:character (:start range)) ": ") message))
       (request! server "shutdown")
       (notify! server "exit")
       (finally
@@ -175,5 +200,7 @@
           (.destroyForcibly process))))))
 
 (comment
-  (lint :cmd "C:\\Users\\Vlaaad\\Downloads\\lua-language-server-3.14.0-win32-x64\\bin\\lua-language-server.exe"
-        :path "test/lua"))
+  (lint :cmd "/Users/vlaaad/Downloads/clojure-lsp"
+        :path "."
+        :ext "clj"))
+
