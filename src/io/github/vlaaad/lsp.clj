@@ -198,9 +198,3 @@
         (.waitFor process 2 TimeUnit/SECONDS)
         (when (.isAlive process)
           (.destroyForcibly process))))))
-
-(comment
-  (lint :cmd "/Users/vlaaad/Downloads/clojure-lsp"
-        :path "."
-        :ext "clj"))
-
